@@ -1,0 +1,13 @@
+schema: "classroom50/repo-config/v1"
+classroom: "msds-ai-2026"
+assignment: "loco-app-assignment"
+secret: "i7f6rcso"
+owner:
+  username: "javierchanj"
+  id: 126897080
+  accepted_at: "2026-09-22T06:22:21Z"
+source:
+  owner: "Modern-Software-Design-Studio"
+  owner_id: 322049187
+  repo: "loco-app-assignment"
+  branch: "main"
