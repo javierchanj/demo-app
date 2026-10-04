@@ -16,4 +16,6 @@ target/
 *.pdb
 
 *.sqlite
-*.sqlite-*.env.production
+*.sqlite-*
+.env.production
+documents/

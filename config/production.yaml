@@ -63,16 +63,18 @@ mailer:
   # SMTP mailer configuration.
   smtp:
     # Enable/Disable smtp mailer.
-    enable: true
+    enable: false
     # SMTP server host. e.x localhost, smtp.gmail.com
-    host: <%= get_env(name="MAILER_HOST") %>
+    # Unused while `enable: false` above, but still rendered at startup, so it
+    # needs a default — otherwise the app fails to boot even with mail disabled.
+    host: "<%= get_env(name="MAILER_HOST", default="") %>"
     # SMTP server port
     port: <%= get_env(name="MAILER_PORT", default="587") %>
     # Use secure connection (SSL/TLS).
     secure: true
     auth:
-      user: <%= get_env(name="MAILER_USER") %>
-      password: <%= get_env(name="MAILER_PASSWORD") %>
+      user: "<%= get_env(name="MAILER_USER", default="") %>"
+      password: "<%= get_env(name="MAILER_PASSWORD", default="") %>"
     # Override the SMTP hello name (default is the machine's hostname)
     # hello_name:
 
