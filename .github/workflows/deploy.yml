@@ -1,0 +1,134 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── 1. Test on every push and every pull request ──────────────
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: loco
+          POSTGRES_PASSWORD: loco
+          POSTGRES_DB: demo_app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+
+  # ── 2. Build, push, deploy (only on pushes to main) ──────────
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC login to AWS
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate deploy configuration
+        run: |
+          missing=()
+          for key in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY ECS_SERVICE JWT_SECRET_ARN DATABASE_URL_ARN; do
+            if [ -z "${!key}" ]; then
+              missing+=("$key")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing deploy configuration: ${missing[*]}"
+            exit 1
+          fi
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+          JWT_SECRET_ARN: ${{ vars.JWT_SECRET_ARN }}
+          DATABASE_URL_ARN: ${{ vars.DATABASE_URL_ARN }}
+
+      - name: Inspect OIDC claims
+        shell: bash
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" |
+          jq -r '.value' |
+          python3 -c 'import sys,json,base64; t=sys.stdin.read().strip(); p=t.split(".")[1]; c=json.loads(base64.urlsafe_b64decode(p + "="*(-len(p)%4))); print(json.dumps({k:c.get(k) for k in ("iss","aud","sub","repository","ref","repository_id","repository_owner_id")},indent=2))'
+
+      - name: Show OIDC subject
+        shell: bash
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" |
+          jq -r '.value' |
+          python3 -c 'import sys,json,base64; p=sys.stdin.read().split(".")[1]; c=json.loads(base64.urlsafe_b64decode(p + "="*(-len(p)%4))); print("aud:",c.get("aud")); print("sub:",c.get("sub"))'
+
+      - name: Log in to AWS
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-demo-app
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to ECS Express Mode
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: ${{ vars.ECS_SERVICE }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          execution-role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole
+          infrastructure-role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/ecsInfrastructureRoleForExpressServices
+          container-port: 5150
+          health-check-path: /_ping
+          cpu: '256'
+          memory: '512'
+          min-task-count: 1
+          max-task-count: 1
+          environment-variables: |
+            [
+              {"name": "LOCO_ENV",        "value": "production"},
+              {"name": "DB_AUTO_MIGRATE", "value": "true"},
+              {"name": "HOST",            "value": "http://localhost"}
+            ]
+          secrets: |
+            [
+              {"name": "JWT_SECRET",   "valueFrom": "${{ vars.JWT_SECRET_ARN }}"},
+              {"name": "DATABASE_URL", "valueFrom": "${{ vars.DATABASE_URL_ARN }}"}
+            ]
+
+      - name: Show the URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.endpoint }}"
